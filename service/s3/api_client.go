@@ -77,6 +77,14 @@ type Options struct {
 	// failures. When nil the API client will use a default retryer.
 	Retryer retry.Retryer
 
+	// Allows you to enable S3 Accelerate feature. All operations compatible with S3
+	// Accelerate will use the accelerate endpoint for requests. Requests not
+	// compatible will fall back to normal S3 requests. The bucket must be enabled for
+	// accelerate to be used with S3 client with accelerate enabled. If the bucket is
+	// not enabled for accelerate an error will be returned. The bucket name must be
+	// DNS compatible to work with accelerate.
+	UseAccelerate bool
+
 	// Allows you to enable the client to use path-style addressing, i.e.,
 	// https://s3.amazonaws.com/BUCKET/KEY. By default, the S3 client will use virtual
 	// hosted bucket addressing when possible(https://BUCKET.s3.amazonaws.com/KEY).
@@ -194,7 +202,7 @@ func addMetadataRetrieverMiddleware(stack *middleware.Stack) {
 }
 
 func addUpdateEndpointMiddleware(stack *middleware.Stack, options Options) {
-	s3cust.UpdateEndpoint(stack, s3cust.UpdateEndpointOptions{UsePathStyle: options.UsePathStyle, GetBucketFromInput: getBucketFromInput})
+	s3cust.UpdateEndpoint(stack, s3cust.UpdateEndpointOptions{Region: options.Region, GetBucketFromInput: getBucketFromInput, UsePathStyle: options.UsePathStyle, UseAccelerate: options.UseAccelerate})
 }
 
 // getBucketFromInput returns a boolean indicating if the input has a modeled
@@ -321,8 +329,6 @@ func getBucketFromInput(input interface{}) (*string, bool) {
 		return i.Bucket, true
 	case *ListObjectVersionsInput:
 		return i.Bucket, true
-	case *GetBucketLocationInput:
-		return i.Bucket, true
 	case *GetPublicAccessBlockInput:
 		return i.Bucket, true
 	case *ListBucketAnalyticsConfigurationsInput:
@@ -367,6 +373,21 @@ func getBucketFromInput(input interface{}) (*string, bool) {
 		return i.Bucket, true
 	default:
 		return nil, false
+	}
+}
+
+// supportAccelerate returns a boolean indicating if the operation associated with
+// the provided input supports S3 Transfer Acceleration
+func supportAccelerate(input interface{}) bool {
+	switch input.(type) {
+	case *DeleteBucketInput:
+		return false
+	case *ListBucketsInput:
+		return false
+	case *CreateBucketInput:
+		return false
+	default:
+		return true
 	}
 }
 
