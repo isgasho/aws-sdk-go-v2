@@ -3,6 +3,7 @@ package customizations
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/url"
 	"strings"
 
@@ -12,6 +13,9 @@ import (
 
 // UpdateEndpointOptions provides the options for the UpdateEndpoint middleware setup.
 type UpdateEndpointOptions struct {
+	// region used
+	Region string
+
 	// functional pointer to fetch bucket name from provided input.
 	// The function is intended to take an input value, and
 	// return a string pointer to value of string, and bool if
@@ -20,19 +24,37 @@ type UpdateEndpointOptions struct {
 
 	// use path style
 	UsePathStyle bool
+
+	// use transfer acceleration
+	UseAccelerate bool
+
+	// functional pointer to indicate support for accelerate.
+	// The function is intended to take an input value, and
+	// return if the operation supports accelerate.
+	SupportsAccelerate func(interface{}) bool
 }
 
 // UpdateEndpoint adds the middleware to the middleware stack based on the UpdateEndpointOptions.
 func UpdateEndpoint(stack *middleware.Stack, options UpdateEndpointOptions) {
 	stack.Serialize.Insert(&updateEndpointMiddleware{
-		getBucketFromInput: options.GetBucketFromInput,
+		region:             options.Region,
 		usePathStyle:       options.UsePathStyle,
+		getBucketFromInput: options.GetBucketFromInput,
+		useAccelerate:      options.UseAccelerate,
+		supportsAccelerate: options.SupportsAccelerate,
 	}, "OperationSerializer", middleware.After)
 }
 
 type updateEndpointMiddleware struct {
-	getBucketFromInput func(interface{}) (*string, bool)
+	region string
+
+	// path style options
 	usePathStyle       bool
+	getBucketFromInput func(interface{}) (*string, bool)
+
+	// accelerate options
+	useAccelerate      bool
+	supportsAccelerate func(interface{}) bool
 }
 
 // ID returns the middleware ID.
@@ -48,6 +70,19 @@ func (u *updateEndpointMiddleware) HandleSerialize(
 		return out, metadata, fmt.Errorf("unknown request type %T", req)
 	}
 
+	// check if accelerate is supported
+	if !u.supportsAccelerate(in.Parameters) && u.useAccelerate {
+		// accelerate is not supported, thus will be ignored
+		log.Println("Transfer acceleration is not supported for the operation, ignoring UseAccelerate.")
+		u.useAccelerate = false
+	}
+
+	// transfer acceleration is not supported with path style urls
+	if u.useAccelerate && u.usePathStyle {
+		log.Println("UseAccelerate is not compatible with UsePathStyle, ignoring UsePathStyle.")
+		u.usePathStyle = false
+	}
+
 	// Below customization only apply if bucket name is provided
 	bucket, ok := u.getBucketFromInput(in.Parameters)
 	if ok && bucket != nil {
@@ -59,13 +94,39 @@ func (u *updateEndpointMiddleware) HandleSerialize(
 }
 
 func (u updateEndpointMiddleware) updateEndpointFromConfig(req *http.Request, bucket string) error {
+	// do nothing if path style is enforced
 	if !u.usePathStyle {
 		if !hostCompatibleBucketName(req.URL, bucket) {
 			// bucket name must be valid to put into the host
 			return fmt.Errorf("bucket name %s is not compatible with S3", bucket)
 		}
+
+		// accelerate is only supported if use path style is disabled
+		if u.useAccelerate {
+			parts := strings.Split(req.URL.Host, ".")
+			if len(parts) < 3 {
+				return fmt.Errorf("unable to update endpoint host for S3 accelerate, hostname invalid, %s", req.URL.Host)
+			}
+
+			if parts[0] == "s3" || strings.HasPrefix(parts[0], "s3-") {
+				parts[0] = "s3-accelerate"
+			}
+
+			for i := 1; i+1 < len(parts); i++ {
+				if strings.EqualFold(parts[i], u.region) {
+					parts = append(parts[:i], parts[i+1:]...)
+					break
+				}
+			}
+
+			// construct the url host
+			req.URL.Host = strings.Join(parts, ".")
+		}
+
+		// move bucket to follow virtual host style
 		moveBucketNameToHost(req.URL, bucket)
 	}
+
 	return nil
 }
 
